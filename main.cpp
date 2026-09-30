@@ -1,4 +1,7 @@
-// PDX V1 Menu — Standalone DX11 + Win32 + ImGui
+// PDX Menu Demo — Standalone DX11 + Win32 + ImGui runtime that consumes
+// the pdx_menu_framework library. Owns its own main(), renders the menu,
+// draws the watermark (framework's Watermark module — strings are demo-
+// owned, so the call site lives here rather than in the framework).
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
@@ -13,6 +16,7 @@
 #include "config_system.h"
 #include "pdx_logo_data.h"
 #include "user_profile.h"
+#include "watermark.h"
 
 // ─── D3D11 globals ─────────────────────────────────────────────────────────
 
@@ -29,10 +33,6 @@ void CleanupDeviceD3D();
 void CreateRenderTarget();
 void CleanupRenderTarget();
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
-
-// ─── FontAwesome icon range ─────────────────────────────────────────────────
-
-static const ImWchar fa_icon_ranges[] = { 0xf000, 0xf999, 0 };
 
 // ─── Logo texture creation ──────────────────────────────────────────────────
 
@@ -133,36 +133,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     // ─── Fonts ───────────────────────────────────────────────────────
 
-    // Regular font — Tahoma 14px
+    // Regular font — Tahoma Bold 13 px. Ships with every Windows install.
+    // First font added becomes ImGui's default so every AddText call that
+    // doesn't override the font picks this up. Falls back to ImGui's
+    // default if the file is somehow missing.
     MenuStyle::g_fontRegular = io.Fonts->AddFontFromFileTTF(
-        "C:\\Windows\\Fonts\\tahoma.ttf", 14.0f);
+        "C:\\Windows\\Fonts\\tahomabd.ttf", 13.0f);
     if (!MenuStyle::g_fontRegular)
         MenuStyle::g_fontRegular = io.Fonts->AddFontDefault();
 
-    // Bold font — Tahoma Bold 14px
+    // Bold slot — same file. Nothing needs a heavier weight than what's
+    // in the regular slot, but keep the slot populated so widgets that
+    // still check `g_fontBold ? ... : GetFont()` fallback chains keep
+    // resolving to a valid ImFont*.
     MenuStyle::g_fontBold = io.Fonts->AddFontFromFileTTF(
-        "C:\\Windows\\Fonts\\tahomabd.ttf", 14.0f);
+        "C:\\Windows\\Fonts\\tahomabd.ttf", 13.0f);
     if (!MenuStyle::g_fontBold)
         MenuStyle::g_fontBold = MenuStyle::g_fontRegular;
 
-    // Icon font (FontAwesome)
-    ImFontConfig iconConfig;
-    iconConfig.MergeMode = false;
-    iconConfig.PixelSnapH = true;
-    iconConfig.GlyphMinAdvanceX = 13.0f;
-
-    // Try multiple paths: exe dir, project root, fonts subdir
-    const char* fontPaths[] = {
-        "fa-solid-900.ttf",
-        "../../fa-solid-900.ttf",       // build/Release -> project root
-        "../fa-solid-900.ttf",          // build -> project root
-        "fonts/fa-solid-900.ttf",
-    };
-    for (const char* path : fontPaths) {
-        MenuStyle::g_fontIcon = io.Fonts->AddFontFromFileTTF(
-            path, 16.0f, &iconConfig, fa_icon_ranges);
-        if (MenuStyle::g_fontIcon) break;
-    }
+    // Icon font (FontAwesome) — embedded in the framework, loaded via a
+    // single call. No .ttf file needs to ship alongside the exe.
+    MenuStyle::LoadIconFont();
 
     io.Fonts->Build();
 
@@ -183,7 +174,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     ImVec4 clearColor(0.04f, 0.04f, 0.05f, 1.0f);
     bool done = false;
-    bool insertWasDown = false;
 
     while (!done) {
         MSG msg;
@@ -214,16 +204,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         Input::Update();
         ImGui_ImplWin32_UpdateInputFromHV();
 
-        // Toggle menu via the engine-owned gate. PollMenuToggle owns the
-        // was-down / armed state internally — we just feed it the live
-        // "is the bound key down" boolean.
-        if (Menu::PollMenuToggle(Input::IsKeyDown(Menu::GetMenuKey())))
+        // Menu-toggle key. TEMPORARILY reads from Input::IsDevKeyDown (the
+        // dev / Win32 fallback path) so the standalone demo can toggle the
+        // menu without a hypervisor loaded. Flip to Input::IsHotkeyDown
+        // before shipping so the runtime cheat's stealth invariant holds
+        // (see feedback_hv_keystates memory).
+        if (Menu::PollMenuToggle(Input::IsDevKeyDown(Menu::GetMenuKey())))
             Menu::ToggleVisibility();
 
         // Per-frame HV user-profile fetch attempt — idempotent. No-op when
         // the gate is off; one-shot when on (caches after first success).
-        // Pre-cache the device on UserProfile so the menu can lazy-upload
-        // the avatar SRV without threading the device through Menu::Render.
         UserProfile::Fetch();
 
         // Start ImGui frame
@@ -232,6 +222,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         ImGui::NewFrame();
 
         Menu::Render();
+        // Watermark is demo-owned chrome — strings live here, not in
+        // the framework. Drawn after the menu so it lands on top of
+        // menu chrome but below the notifications that Menu::Render
+        // pushes to the foreground drawlist internally.
+        Watermark::Render("new menu", "active");
 
         // Rendering
         ImGui::Render();
